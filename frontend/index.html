@@ -660,7 +660,7 @@
   // =============================================================
   // Backend proxy — see backend/proxy.js. Update API_BASE once deployed.
   // =============================================================
-  var API_BASE = 'http://localhost:3001'; // TODO: point at the real deployed proxy
+  var API_BASE = 'https://oooh-my-hat.onrender.com'; // if Render assigned a different URL, update this
   async function api(path, opts){
     opts = opts || {};
     var headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{});

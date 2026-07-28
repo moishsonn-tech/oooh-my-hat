@@ -4,6 +4,7 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 
 // ── Secrets: from env or a 0600 file — NEVER hardcode in a committed file ────────
 const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || '';
@@ -12,10 +13,17 @@ const STATE_FILE    = process.env.STATE_FILE || '/var/www/state.json';
 const STATE_KEY_FILE= process.env.STATE_KEY_FILE || '/var/www/.state-key';
 
 // ── Encryption at rest (AES-256-GCM) for any sensitive tokens we persist ─────────
+// Self-heals its own directory so this works whether STATE_FILE points at a droplet
+// path, a relative ./data path, or a host's ephemeral disk (Render's free tier resets
+// this on every redeploy — known/accepted tradeoff, see CLAUDE.md deploy notes).
+function ensureStateDir(){
+  try{ fs.mkdirSync(path.dirname(STATE_FILE), {recursive:true}); }catch(e){}
+}
 function getStateKey(){
   try{ if(fs.existsSync(STATE_KEY_FILE)){ const k=fs.readFileSync(STATE_KEY_FILE,'utf8').trim();
     if(k.length>=64) return Buffer.from(k.slice(0,64),'hex'); } }catch(e){}
   const nk=crypto.randomBytes(32);
+  ensureStateDir();
   try{ fs.writeFileSync(STATE_KEY_FILE, nk.toString('hex'), {mode:0o600}); }catch(e){}
   return nk;
 }
@@ -28,6 +36,7 @@ function loadST(){ try{ const j=JSON.parse(fs.readFileSync(STATE_FILE,'utf8'));
 function saveST(s){ try{ const iv=crypto.randomBytes(12);
   const e=crypto.createCipheriv('aes-256-gcm',STATE_K,iv);
   const ct=Buffer.concat([e.update(JSON.stringify(s),'utf8'),e.final()]);
+  ensureStateDir();
   fs.writeFileSync(STATE_FILE,JSON.stringify({__enc:1,iv:iv.toString('hex'),
     ct:ct.toString('hex'),tag:e.getAuthTag().toString('hex')})); }catch(e){} }
 let ST = loadST();
@@ -116,7 +125,7 @@ http.createServer((req,res)=>{
     });
   }
   res.writeHead(404); res.end();
-}).listen(3001,()=>console.log('proxy :3001 (behind nginx/TLS) | CORS '+APP_ORIGIN));
+}).listen(process.env.PORT || 3001,()=>console.log('proxy :'+(process.env.PORT||3001)+' | CORS '+APP_ORIGIN));
 
 function readJsonBody(req, cb){
   let body=''; req.on('data',c=>body+=c);
