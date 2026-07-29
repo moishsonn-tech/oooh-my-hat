@@ -381,6 +381,15 @@
   .trend-cell { display: flex; align-items: center; justify-content: flex-end; }
   .trend-cell svg { width: 54px; height: 20px; }
 
+  /* ---------- Earnings ---------- */
+  .earnings-total { text-align: right; }
+  .earnings-total-value {
+    font-family: 'Plex Mono', monospace; font-weight: 700; font-size: 20px; letter-spacing: -0.01em;
+    color: var(--ink-900); font-variant-numeric: tabular-nums;
+  }
+  .earnings-total-foot { display: flex; align-items: center; justify-content: flex-end; margin-top: 4px; }
+  .platform-rate-note { color: var(--ink-500); font-size: 11px; margin-top: 1px; }
+
   /* ---------- Compare ---------- */
   .compare-card { margin-top: 16px; }
   .compare-pickers { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -591,6 +600,33 @@
       </div>
     </div>
 
+    <div class="card" style="margin-top:16px;">
+      <div class="card-head">
+        <div>
+          <div class="card-title">Estimated earnings</div>
+          <div class="card-sub">Modeled from typical per-stream payout rates — not a real royalty statement.</div>
+        </div>
+        <div class="earnings-total">
+          <div class="earnings-total-value" id="earningsTotalValue"></div>
+          <div class="earnings-total-foot"><span class="delta" id="earningsTotalDelta"></span></div>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="releases">
+          <thead>
+            <tr>
+              <th>Platform</th>
+              <th class="num">Streams</th>
+              <th class="num">Est. rate /1K</th>
+              <th class="num">Est. earnings</th>
+              <th class="num">Trend</th>
+            </tr>
+          </thead>
+          <tbody id="earningsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card compare-card">
       <div class="card-head">
         <div>
@@ -716,6 +752,15 @@
   }
   function fmtFull(n){ return Math.round(n).toLocaleString('en-US'); }
   function fmtPct(n){ return (n>=0?'+':'') + n.toFixed(1) + '%'; }
+  function fmtMoney(n){
+    var neg = n < 0; n = Math.abs(n);
+    var out;
+    if (n >= 1000000) out = '$' + (n/1000000).toFixed(2).replace(/\.00$/,'') + 'M';
+    else if (n >= 1000) out = '$' + (n/1000).toFixed(1).replace(/\.0$/,'') + 'K';
+    else out = '$' + n.toFixed(2);
+    return (neg ? '-' : '') + out;
+  }
+  function fmtMoneyFull(n){ return (n<0?'-':'') + '$' + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
   function esc(s){
     return String(s==null?'':s).replace(/[&<>"']/g, function(c){
       return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
@@ -889,6 +934,18 @@
     { code:'ZG', name:'Zing',          api:false },
     { code:'NK', name:'Naki',          api:false }
   ];
+
+  // Illustrative blended per-stream payout rates — actual royalties vary by
+  // distributor, listener country mix, and subscription vs. ad-supported tier.
+  var PLATFORM_RATE = { SP:0.0038, AM:0.0100, YT:0.0020, AZ:0.0040, '24':0.0030, ZG:0.0030, NK:0.0030 };
+  var PLATFORM_RATE_PUBLISHED = { SP:true, AM:true, YT:true, AZ:true, '24':false, ZG:false, NK:false };
+  var earningsWeekly = weekLabels52.map(function(_, i){
+    var wk = 0;
+    PLATFORMS_META.forEach(function(meta){
+      wk += (PLATFORM_WEEKLY[meta.code][i] || 0) * PLATFORM_RATE[meta.code];
+    });
+    return wk;
+  });
 
   var SONGS = [
     { id:'song-new-single',   name:'New Single — Studio Version',       date:'Jun 12, 2026', totalStreams:412800, playlistAdds:62, daily:genSeries(120,3200, 0.018, 0.14,'song-new-single') },
@@ -1150,6 +1207,40 @@
     });
     platformGrid.querySelectorAll('[data-open-settings]').forEach(function(btn){
       btn.addEventListener('click', openSettings);
+    });
+  }
+
+  // =============================================================
+  // Earnings (settings-aware, mirrors Platforms)
+  // =============================================================
+  function renderEarnings(){
+    var rangeKey = STATE.range, rangeLabel = RANGE_LABEL[rangeKey];
+    var totals = rangeStats(earningsWeekly, rangeKey);
+    var cls = trendClass(totals.deltaPct);
+    document.getElementById('earningsTotalValue').textContent = fmtMoney(totals.total) + ' (' + rangeLabel + ')';
+    var deltaEl = document.getElementById('earningsTotalDelta');
+    deltaEl.className = 'delta ' + cls;
+    deltaEl.innerHTML = deltaArrowSvg(cls) + fmtPct(totals.deltaPct) + ' vs prior period';
+
+    var el = document.getElementById('earningsBody');
+    el.innerHTML = '';
+    PLATFORMS_META.forEach(function(meta){
+      var stats = rangeStats(PLATFORM_WEEKLY[meta.code], rangeKey);
+      var rate = PLATFORM_RATE[meta.code];
+      var published = PLATFORM_RATE_PUBLISHED[meta.code];
+      var earnings = stats.total * rate;
+      var spark = sampleTo12(stats.series.map(function(v){ return v * rate; }));
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><div class="track-name">'+esc(meta.name)+'</div>' +
+          (published ? '' : '<div class="platform-rate-note">*rate not publicly published — estimate</div>') +
+        '</td>' +
+        '<td class="num">'+fmtFull(stats.total)+'</td>' +
+        '<td class="num">$'+(rate*1000).toFixed(2)+(published?'':'*')+'</td>' +
+        '<td class="num">'+fmtMoneyFull(earnings)+'</td>' +
+        '<td class="num"><div class="trend-cell"><span class="spark-holder"></span></div></td>';
+      tr.querySelector('.spark-holder').appendChild(makeSparkSVG(spark, {w:54,h:20,cls:'', color: PLATFORM_COLOR[meta.code] || 'var(--accent-line)'}));
+      el.appendChild(tr);
     });
   }
 
@@ -1568,6 +1659,7 @@
     renderKPIs();
     renderHero();
     renderPlatforms();
+    renderEarnings();
     renderCompareResult();
   }
 
