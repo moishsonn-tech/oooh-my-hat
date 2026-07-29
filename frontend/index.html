@@ -485,23 +485,7 @@
   .pin-gate-panel input[inputmode="numeric"] { font-size: 20px; letter-spacing: .3em; text-align: center; width: 100%; margin-top: 14px; }
 </style>
 
-<div class="modal-overlay" id="pinGate">
-  <div class="modal-panel pin-gate-panel" role="dialog" aria-modal="true" aria-labelledby="pinGateTitle" style="max-width:340px;">
-    <div class="modal-head" style="margin-bottom:2px;">
-      <div>
-        <div class="card-title" id="pinGateTitle">Enter access PIN</div>
-        <div class="card-sub">This dashboard is gated while it's still a work-in-progress mockup</div>
-      </div>
-    </div>
-    <form id="pinGateForm">
-      <input type="password" inputmode="numeric" maxlength="6" class="field-input" id="pinGateInput" placeholder="••••" autocomplete="off" autofocus/>
-      <div class="pin-gate-error" id="pinGateError"></div>
-      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:8px;">Unlock</button>
-    </form>
-  </div>
-</div>
-
-<div class="app locked" id="appRoot">
+<div class="app" id="appRoot">
   <header class="top">
     <div class="top-inner">
       <div class="brand">
@@ -693,52 +677,6 @@
 
 <script>
 (function(){
-  // =============================================================
-  // Backend proxy — see backend/proxy.js. Update API_BASE once deployed.
-  // =============================================================
-  var API_BASE = 'https://oooh-my-hat.onrender.com'; // if Render assigned a different URL, update this
-  async function api(path, opts){
-    opts = opts || {};
-    var headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{});
-    var r = await fetch(API_BASE+path, Object.assign({}, opts, {headers:headers}));
-    var data = null;
-    try { data = await r.json(); } catch(e){}
-    if (!r.ok) throw new Error((data && data.error) || ('request failed: '+r.status));
-    return data;
-  }
-
-  // =============================================================
-  // PIN gate — convenience-level only; backend/proxy.js is the real check.
-  // =============================================================
-  function unlockApp(){
-    document.getElementById('appRoot').classList.remove('locked');
-    document.getElementById('pinGate').classList.add('hidden');
-  }
-  function initPinGate(){
-    if (sessionStorage.getItem('oohmyhat-unlocked') === '1'){ unlockApp(); return; }
-    var form = document.getElementById('pinGateForm');
-    var input = document.getElementById('pinGateInput');
-    var errEl = document.getElementById('pinGateError');
-    form.addEventListener('submit', function(e){
-      e.preventDefault();
-      errEl.textContent = '';
-      var pin = input.value.trim();
-      api('/api/pin/verify', { method:'POST', body: JSON.stringify({ pin: pin }) })
-        .then(function(res){
-          if (res && res.ok){
-            sessionStorage.setItem('oohmyhat-unlocked','1');
-            unlockApp();
-          } else {
-            errEl.textContent = 'Incorrect PIN.';
-            input.value = ''; input.focus();
-          }
-        })
-        .catch(function(err){
-          errEl.textContent = "Can't reach the server (" + err.message + '). Is the backend running?';
-        });
-    });
-  }
-
   // =============================================================
   // Utilities
   // =============================================================
@@ -1597,33 +1535,7 @@
           '</div>'
         );
       }
-    }).join('') +
-      '<div class="settings-row" style="border-top:1px solid var(--border);margin-top:4px;padding-top:16px;">' +
-        '<div class="settings-left"><div><div class="p-name">Access PIN</div><div class="list-sub">Anyone with this PIN can open the dashboard</div></div></div>' +
-        '<div class="settings-right settings-manual">' +
-          '<input type="text" inputmode="numeric" maxlength="6" class="field-input" id="pinChangeInput" placeholder="New PIN"/>' +
-          '<button class="btn btn-ghost btn-sm" id="pinChangeSave">Save</button>' +
-          '<span class="saved-note" id="pinChangeNote">Saved</span>' +
-        '</div>' +
-      '</div>';
-
-    var pinChangeBtn = el.querySelector('#pinChangeSave');
-    if (pinChangeBtn){
-      pinChangeBtn.addEventListener('click', function(){
-        var input = el.querySelector('#pinChangeInput');
-        var note = el.querySelector('#pinChangeNote');
-        var pin = input.value.trim();
-        if (!/^\d{3,6}$/.test(pin)){ note.textContent = 'PIN must be 3-6 digits'; note.classList.add('show'); return; }
-        api('/api/pin/change', { method:'POST', body: JSON.stringify({ newPin: pin }) })
-          .then(function(){
-            note.textContent = 'Saved'; note.classList.add('show'); input.value = '';
-            setTimeout(function(){ note.classList.remove('show'); }, 1600);
-          })
-          .catch(function(err){
-            note.textContent = 'Failed: ' + err.message; note.classList.add('show');
-          });
-      });
-    }
+    }).join('');
 
     el.querySelectorAll('[data-toggle]').forEach(function(sw){
       function flip(){
@@ -1701,7 +1613,6 @@
   renderAskChips();
   populateCompareSelects();
   renderAll();
-  initPinGate();
 })();
 </script>
 
