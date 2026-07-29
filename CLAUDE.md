@@ -67,10 +67,22 @@ template silently regresses production. Rules:
 - One brand accent color used sparingly (active states, primary actions); everything else a neutral
   gray/off-white scale with tiered text hierarchy. Pick concrete colors per project.
 - Soft depth, not gloss: small-to-medium radius, low-opacity layered shadows, hairline borders.
-- Typography: Inter/system for body; a distinct display face for big numbers/titles; UPPERCASE
-  micro-labels with letter-spacing for stat labels / table headers / section labels. Antialiased.
+- Typography: Inter/system for body; a distinct display face for section titles/wordmark; monospace
+  with `font-variant-numeric: tabular-nums` for KPI values and table numbers so columns and deltas
+  align. UPPERCASE micro-labels with letter-spacing for stat labels / table headers / section
+  labels. Antialiased.
 - Data-dense but breathable; subtle ~.15–.2s transitions and tiny hover lift only.
 - Mobile = native-app feel (bottom nav, safe-area insets, bottom-sheet modals), not a shrunk desktop.
+- Known external entities with real brand colors (platforms, integrations) get a muted
+  `color-mix()` tint on their icon/badge for at-a-glance recognition; entities with no reliable
+  color (manual-entry, unconnected, "other") stay neutral gray — don't fake a brand tint you don't
+  have.
+- Any illustrative, modeled, or estimated figure gets its caveat inline where it's shown (a card
+  subtitle, or a row-level note/asterisk), not only in a page-level footer — the caveat should
+  travel with the number, not get separated from it.
+- Icons/wordmark: simple 2–4-stroke geometric line-art SVG (`currentColor` per path, mapped through
+  CSS custom properties), not icon fonts or emoji — cheap to reskin on a rebrand, stays legible in
+  both themes.
 - Avoid: loud gradients, neon glows, shadow overload, decorative emoji chrome, blobby shapes,
   comic fonts, skeuomorphism, gimmicky animation. When unsure, choose the more restrained option.
 
