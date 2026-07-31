@@ -203,6 +203,44 @@ Two lessons worth keeping for the next platform integration like this one:
     streams/listeners/daily earnings) — the data exists, it's a business ask (recurring
     export, portal access, or an API partnership), not a technical one.
 
+### 14a. Multi-artist accounts (self-serve, Chartmetric-style)
+
+Everything in §14 above was built single-tenant (one shared connection, one artist). Scaffolding
+was added for artists to sign up and connect their OWN platforms themselves — no allowlist, no
+approval step, matching how Chartmetric works rather than the invite-only pattern documented in
+§4/`BACKEND_SETUP.md` for internal tools. **Not live yet** — every piece below is inert until a
+real Supabase project exists and its keys are filled into `.env`/`frontend/supabase-config.js`
+(see the comments in both files); until then the app behaves exactly as documented above.
+
+- **`supabase/schema.sql`** — run once in the new project's SQL editor. `artist_profiles`
+  (auto-created per signup via trigger), `platform_links` (non-secret IDs like a Spotify artist
+  ID — artist's own browser writes these directly, RLS-protected, no backend involved),
+  `platform_connections` (OAuth refresh tokens / manual-platform passwords — RLS allows the
+  artist to read status and disconnect, but NOT insert/update; only the backend's service_role
+  key can write a secret, so an artist can never fake a "connected" status).
+- **Auth**: Supabase Auth, magic link for first login (self-serve — anyone can request one, no
+  approval), then "Register a passkey on this device" once signed in for fast sign-in after —
+  same proven pattern as ENS Auto Group, minus that project's `allowed_emails` gate (deliberately
+  omitted here).
+- **`frontend/supabase-config.js` + `frontend/auth-gate.js`** — shared, reusable across pages.
+  `auth-gate.js` no-ops completely (no sign-in screen, no behavior change) until
+  `supabase-config.js` has a real project URL/anon key — this is what makes the whole feature
+  safe to have already merged: today's open, single-tenant dashboard is unaffected either way.
+- **`backend/proxy.js`** — every platform-connection route now branches on
+  `supabaseConfigured()`: signed Supabase key present → verify the artist's own access token
+  (`verifyArtistToken`), read/write that one artist's row via `service_role` (bypasses RLS by
+  design, same trust level as any server-side admin key); unset → today's exact single-tenant
+  fallback (the local encrypted `ST` blob). The YouTube Analytics OAuth round-trip carries the
+  artist's identity through Google's redirect via a signed `state` param (`signOAuthState`/
+  `verifyOAuthState`, HMAC'd with the same key that encrypts `ST`) since the callback has no
+  other way to know who started the flow.
+- **Still needed before this can go live**: create the actual Supabase project, run the schema,
+  fill in the four config spots above, and pick a real domain (Moshe's call — deploying this is
+  tied to the eventual custom-domain launch, not GitHub Pages/Render as they exist today).
+  Dashboard/finance pages (`index.html`/`finance.html`) still show the same illustrative sample
+  data regardless of who's signed in — wiring real per-artist data into those is a separate,
+  not-yet-started step beyond just accounts + connections.
+
 ---
 
 ## The meta-rules (apply to every integration)

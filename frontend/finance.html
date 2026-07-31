@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AI-Artist Intelligence — Financials</title>
 <link rel="manifest" href="manifest.json">
+<!-- Multi-artist auth (no-ops until supabase-config.js has a real project — see that file) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+<script src="supabase-config.js" defer></script>
+<script src="auth-gate.js" defer></script>
+<script defer>
+  document.addEventListener('DOMContentLoaded', function () {
+    AuthGate.init(function (session) {
+      var acct = document.getElementById('artistAcctBtn');
+      if (acct) acct.style.display = session ? '' : 'none';
+    });
+  });
+</script>
 </head>
 <body>
 <style>
@@ -507,6 +519,7 @@
           <span class="name">Benny Friedman</span>
         </div>
         <a class="btn btn-ghost btn-sm" href="index.html" style="text-decoration:none;">← Dashboard</a>
+        <button class="btn btn-ghost btn-sm" id="artistAcctBtn" style="display:none;" onclick="AuthGate.signOut()">Sign out</button>
         <div class="segmented" id="dateRangeSeg" role="group" aria-label="Date range">
           <button data-range="28">28D</button>
           <button class="active" data-range="90">90D</button>

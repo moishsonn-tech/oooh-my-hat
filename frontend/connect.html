@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Connect Platforms — AI-Artist Intelligence</title>
 <link rel="manifest" href="manifest.json">
+<!-- Multi-artist auth (no-ops until supabase-config.js has a real project — see that file) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+<script src="supabase-config.js" defer></script>
+<script src="auth-gate.js" defer></script>
 </head>
 <body>
 <style>
@@ -256,6 +260,7 @@
           <span class="name">Benny Friedman</span>
         </div>
         <a class="btn btn-ghost btn-sm" href="index.html" style="text-decoration:none;">← Dashboard</a>
+        <button class="btn btn-ghost btn-sm" id="artistAcctBtn" style="display:none;" onclick="AuthGate.signOut()">Sign out</button>
       </div>
     </div>
   </header>
@@ -275,7 +280,7 @@
   </main>
 </div>
 
-<script>
+<script defer>
 (function(){
   function esc(s){
     return String(s==null?'':s).replace(/[&<>"']/g, function(c){
@@ -291,15 +296,20 @@
 
   var qp = new URLSearchParams(location.search);
 
+  // Set once AuthGate resolves (null if unconfigured or signed out — every per-artist
+  // behavior below is gated on this being non-null, so the page degrades to today's
+  // exact single-tenant/open behavior whenever it's null).
+  var accessToken = null;
+
   var PLATFORMS = [
-    { code:'SP', name:'Spotify', kind:'public-api', endpoint:'/api/spotify/artist',
+    { code:'SP', name:'Spotify', kind:'public-api', endpoint:'/api/spotify/artist', linkPlatform:'spotify',
       idLabel:'Spotify Artist ID', idPlaceholder:'e.g. 1Cs2sQ...',
       caveat:'Spotify’s public API has no stream-count data — this shows followers and popularity score only. Real stream counts aren’t available via API to anyone, even the artist.' },
-    { code:'YT', name:'YouTube (channel stats)', kind:'public-api', endpoint:'/api/youtube/channel',
+    { code:'YT', name:'YouTube (channel stats)', kind:'public-api', endpoint:'/api/youtube/channel', linkPlatform:'youtube',
       idLabel:'YouTube Channel ID', idPlaceholder:'e.g. UC...',
       caveat:'Public subscriber, view, and video counts — no login needed. For real per-video streams and demographics, use YouTube Analytics below instead.' },
     { code:'YTA', name:'YouTube Analytics', kind:'oauth',
-      caveat:'The one platform here with real per-video stream and demographic data available via a genuine sign-in — needs a one-time consent click from whoever manages Benny’s channel.' },
+      caveat:'The one platform here with real per-video stream and demographic data available via a genuine sign-in — needs a one-time consent click from whoever manages the channel.' },
     { code:'AM', name:'Apple Music', kind:'pending',
       caveat:'Apple’s real Music Analytics API exists but is eligibility-gated — it requires applying to Apple, not a self-serve connection. Catalog-only API access (no analytics) is available separately if ever needed.' },
     { code:'AZ', name:'Amazon Music', kind:'pending',
@@ -395,10 +405,36 @@
     if(el){ el.textContent=''; el.classList.remove('show'); }
   }
 
+  function authHeaders(){
+    return accessToken ? { 'Authorization': 'Bearer '+accessToken } : {};
+  }
   function apiFetch(path, opts){
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers||{}, authHeaders());
     return fetch(API_BASE+path, opts).then(function(r){
       return r.json().then(function(j){ return { ok:r.ok, status:r.status, json:j }; });
     });
+  }
+
+  // Non-secret platform IDs (Spotify artist ID, YouTube channel ID) are safe for the
+  // artist's own browser session to read/write straight to Supabase, no backend
+  // involved — see supabase/schema.sql platform_links RLS ("artists manage own
+  // platform links"). No-op when unconfigured/signed out.
+  function savePlatformLink(linkPlatform, externalId){
+    var c = window.AuthGate && AuthGate.getClient();
+    if(!c || !accessToken) return Promise.resolve();
+    return c.auth.getUser().then(function(res){
+      var uid = res && res.data && res.data.user && res.data.user.id;
+      if(!uid) return;
+      return c.from('platform_links').upsert({ artist_id: uid, platform: linkPlatform, external_id: externalId });
+    });
+  }
+  function loadPlatformLink(linkPlatform){
+    var c = window.AuthGate && AuthGate.getClient();
+    if(!c || !accessToken) return Promise.resolve(null);
+    return c.from('platform_links').select('external_id').eq('platform', linkPlatform).maybeSingle()
+      .then(function(res){ return (res && res.data && res.data.external_id) || null; })
+      .catch(function(){ return null; });
   }
 
   // ---- Public-data platforms (Spotify, YouTube channel stats) ----
@@ -407,6 +443,9 @@
     var btn = card.querySelector('[data-connect-btn]');
     var input = card.querySelector('[data-id-input]');
     var result = card.querySelector('[data-result]');
+    if(accessToken){
+      loadPlatformLink(p.linkPlatform).then(function(id){ if(id) input.value = id; });
+    }
     btn.addEventListener('click', function(){
       clearError(p.code);
       var id = input.value.trim();
@@ -416,6 +455,7 @@
           btn.disabled = false; btn.textContent = 'Connect';
           if(!res.ok){ setChip(p.code,'warn','Not connected'); showError(p.code, res.json.error || 'Connection failed'); return; }
           setChip(p.code,'good','Connected · live public data');
+          if(id) savePlatformLink(p.linkPlatform, id);
           var j = res.json;
           var lines = [];
           if(p.code==='SP'){
@@ -442,6 +482,16 @@
     var card = document.querySelector('[data-card="'+p.code+'"]');
     var btn = card.querySelector('[data-oauth-btn]');
     btn.addEventListener('click', function(){
+      if(accessToken){
+        // Multi-artist mode: get a signed, artist-scoped state first so the backend
+        // knows whose connection this is once Google redirects back.
+        apiFetch('/api/youtube-analytics/start', { method:'POST' }).then(function(res){
+          if(!res.ok){ showError(p.code, res.json.error || 'Could not start sign-in'); return; }
+          location.href = API_BASE + '/api/youtube-analytics/auth?state=' + encodeURIComponent(res.json.state);
+        });
+        return;
+      }
+      // Unconfigured/signed-out — today's single-tenant flow, unchanged.
       location.href = API_BASE + '/api/youtube-analytics/auth';
     });
     var flag = qp.get('yt_analytics');
@@ -492,13 +542,21 @@
     }).catch(function(){ setChip(p.code,'neutral','No credentials on file'); });
   }
 
-  renderGrid();
-  PLATFORMS.forEach(function(p){
-    if(p.kind==='public-api') wirePublicApi(p);
-    else if(p.kind==='oauth') wireOAuth(p);
-    else if(p.kind==='pending') wirePending(p);
-    else if(p.kind==='manual') wireManual(p);
-  });
+  function boot(session){
+    accessToken = session ? session.access_token : null;
+    var acct = document.getElementById('artistAcctBtn');
+    if(acct) acct.style.display = session ? '' : 'none';
+    renderGrid();
+    PLATFORMS.forEach(function(p){
+      if(p.kind==='public-api') wirePublicApi(p);
+      else if(p.kind==='oauth') wireOAuth(p);
+      else if(p.kind==='pending') wirePending(p);
+      else if(p.kind==='manual') wireManual(p);
+    });
+  }
+
+  if(window.AuthGate) AuthGate.init(boot);
+  else boot(null); // auth-gate.js failed to load — degrade to today's open behavior
 })();
 </script>
 </body>

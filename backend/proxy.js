@@ -23,6 +23,83 @@ const YT_OAUTH_CLIENT_SECRET = process.env.YT_OAUTH_CLIENT_SECRET || '';
 const YT_OAUTH_REDIRECT_URI  = process.env.YT_OAUTH_REDIRECT_URI || '';
 const CONNECT_PAGE_URL       = process.env.CONNECT_PAGE_URL || (APP_ORIGIN + '/connect.html');
 
+// ── Multi-artist accounts (Supabase Auth + Postgres) ──────────────────────────────
+// Self-serve artist signup/login lives entirely in Supabase (frontend talks to it
+// directly with the anon key — see frontend/supabase-config.js). This backend never
+// sees passwords or sessions; it only ever verifies an artist's own access token
+// (via GET /auth/v1/user) and, once verified, reads/writes that ONE artist's row
+// using the service_role key, which bypasses RLS — the same trust boundary as any
+// server-side admin key. SUPABASE_SERVICE_ROLE_KEY is a crown-jewel secret: never
+// log it, never send it to the client, never put it anywhere but this env var.
+// Unset (the default) = every route below falls back to the pre-existing
+// single-tenant behavior (the local encrypted ST blob) exactly as it works today.
+const SUPABASE_URL              = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+function supabaseConfigured(){ return !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY); }
+function supabaseHost(){ return SUPABASE_URL.replace(/^https?:\/\//,'').replace(/\/$/,''); }
+function bearerToken(req){
+  const m=(req.headers['authorization']||'').match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
+// Resolves an artist's OWN Supabase access token (sent by connect.html) to their
+// artist_id — this is a different check from verifyIdToken()/ADMIN_EMAILS above,
+// which is for admin-only routes and isn't wired to Supabase.
+function verifyArtistToken(accessToken, cb){
+  if(!supabaseConfigured()) return cb(new Error('supabase not configured'));
+  if(!accessToken) return cb(new Error('no token'));
+  httpsJSON({hostname:supabaseHost(), path:'/auth/v1/user', method:'GET',
+    headers:{'Authorization':'Bearer '+accessToken, 'apikey':SUPABASE_SERVICE_ROLE_KEY}},
+    null, (err,status,json)=>{
+      if(err) return cb(err);
+      if(status>=400 || !json.id) return cb(new Error('invalid token'));
+      cb(null, {id:json.id, email:json.email});
+    });
+}
+function supabaseUpsert(table, row, cb){
+  const body = JSON.stringify(row);
+  httpsJSON({hostname:supabaseHost(), path:'/rest/v1/'+table+'?on_conflict=artist_id,platform',
+    method:'POST',
+    headers:{
+      'Authorization':'Bearer '+SUPABASE_SERVICE_ROLE_KEY, 'apikey':SUPABASE_SERVICE_ROLE_KEY,
+      'Content-Type':'application/json', 'Prefer':'resolution=merge-duplicates,return=minimal',
+      'Content-Length':Buffer.byteLength(body)
+    }}, body, cb);
+}
+function supabaseSelect(table, filterQs, cb){
+  httpsJSON({hostname:supabaseHost(), path:'/rest/v1/'+table+'?'+filterQs, method:'GET',
+    headers:{'Authorization':'Bearer '+SUPABASE_SERVICE_ROLE_KEY, 'apikey':SUPABASE_SERVICE_ROLE_KEY}},
+    null, cb);
+}
+// One-time signed OAuth state, carrying WHICH artist started the connect flow through
+// Google's redirect round-trip (Google returns state back verbatim). HMAC'd with the
+// same key that encrypts ST at rest — forging one would require that key. 10-minute
+// TTL is generous for "click connect, approve on Google's consent screen."
+function signOAuthState(artistId){
+  const payload = artistId + '.' + Date.now();
+  const sig = crypto.createHmac('sha256', STATE_K).update(payload).digest('hex');
+  return Buffer.from(payload+'.'+sig).toString('base64url');
+}
+function verifyOAuthState(state){
+  try{
+    const parts = Buffer.from(String(state), 'base64url').toString('utf8').split('.');
+    if(parts.length!==3) return null;
+    const [artistId, ts, sig] = parts;
+    const expected = crypto.createHmac('sha256', STATE_K).update(artistId+'.'+ts).digest('hex');
+    if(sig!==expected) return null;
+    if(Date.now() - Number(ts) > 10*60*1000) return null;
+    return artistId;
+  }catch(e){ return null; }
+}
+// Encrypts a per-artist secret (OAuth refresh token, manual-platform password) for
+// the platform_connections.encrypted_secret column — same AES-256-GCM primitive as
+// saveST(), just scoped to one value instead of the whole state blob.
+function encryptSecret(obj){
+  const iv=crypto.randomBytes(12);
+  const e=crypto.createCipheriv('aes-256-gcm',STATE_K,iv);
+  const ct=Buffer.concat([e.update(JSON.stringify(obj),'utf8'),e.final()]);
+  return iv.toString('hex')+'.'+ct.toString('hex')+'.'+e.getAuthTag().toString('hex');
+}
+
 // ── Encryption at rest (AES-256-GCM) for any sensitive tokens we persist ─────────
 // Self-heals its own directory so this works whether STATE_FILE points at a droplet
 // path, a relative ./data path, or a host's ephemeral disk (Render's free tier resets
@@ -137,11 +214,16 @@ function queryParam(req, name){
 //    /api/manual-platform/credentials accepts real third-party passwords — it gets the
 //    tightest limit of the group for that reason, encrypts them immediately (see
 //    ST.manualCreds below), and is never read back in plaintext by any route.
+//  - /api/youtube-analytics/start is a THIRD case, not open at all: it requires the
+//    artist's own Supabase access token in the Authorization header and 401s without
+//    one (see verifyArtistToken above) — it's exempt from the verifyIdToken() gate
+//    below only because that gate checks a different, unconfigured admin IdP, not
+//    because this route lacks its own auth check.
 const OPEN_ROUTE_LIMITS = {
   '/api/pin/verify': 8, '/api/pin/change': 8,
   '/api/spotify/artist': 30, '/api/youtube/channel': 30,
   '/api/youtube-analytics/auth': 20, '/api/youtube-analytics/callback': 20,
-  '/api/youtube-analytics/status': 60,
+  '/api/youtube-analytics/status': 60, '/api/youtube-analytics/start': 20,
   '/api/manual-platform/credentials': 10, '/api/manual-platform/status': 60
 };
 
@@ -252,9 +334,24 @@ function route(req,res,url){
   // analytics API exists and is self-serve, gated only by a one-time consent click from
   // whoever owns Benny's channel. Refresh token is folded into the encrypted ST blob
   // (same AES-256-GCM primitive as the PIN hash) — never returned to the client. ────
+  // POST, requires the artist's own Supabase access token — hands back a signed
+  // state so /auth (a plain GET redirect, no header to carry a token in) still knows
+  // which artist is connecting once Google redirects back to /callback. No-ops with
+  // 503 until Supabase is configured (see supabaseConfigured() above); connect.html
+  // only calls this when it detected a real Supabase session, so this being 503 in
+  // the meantime never blocks today's single-tenant flow below.
+  if(req.method==='POST' && url==='/api/youtube-analytics/start'){
+    if(!supabaseConfigured()) return sendJson(res,503,{error:'multi-artist accounts not configured yet'});
+    return verifyArtistToken(bearerToken(req), (err, artist)=>{
+      if(err) return sendJson(res,401,{error:'unauthorized'});
+      sendJson(res,200,{state: signOAuthState(artist.id)});
+    });
+  }
+
   if(req.method==='GET' && url==='/api/youtube-analytics/auth'){
     if(!YT_OAUTH_CLIENT_ID || !YT_OAUTH_REDIRECT_URI)
       return sendJson(res,503,{error:'YouTube Analytics OAuth not configured'});
+    const state = queryParam(req,'state');
     const params = new URLSearchParams({
       client_id: YT_OAUTH_CLIENT_ID,
       redirect_uri: YT_OAUTH_REDIRECT_URI,
@@ -263,12 +360,14 @@ function route(req,res,url){
       access_type: 'offline',
       prompt: 'consent'
     });
+    if(state) params.set('state', state); // absent = today's single-tenant flow, unchanged
     res.writeHead(302, {Location:'https://accounts.google.com/o/oauth2/v2/auth?'+params.toString()});
     return res.end();
   }
 
   if(req.method==='GET' && url==='/api/youtube-analytics/callback'){
     const code = queryParam(req,'code');
+    const state = queryParam(req,'state');
     if(!code) return redirectToConnect(res,'error');
     const body = new URLSearchParams({
       code, client_id: YT_OAUTH_CLIENT_ID, client_secret: YT_OAUTH_CLIENT_SECRET,
@@ -278,14 +377,36 @@ function route(req,res,url){
       headers:{'Content-Type':'application/x-www-form-urlencoded','Content-Length':Buffer.byteLength(body)}},
       body, (err,status,json)=>{
         if(err || !json.refresh_token) return redirectToConnect(res,'error');
+        const artistId = (state && supabaseConfigured()) ? verifyOAuthState(state) : null;
+        if(artistId){
+          return supabaseUpsert('platform_connections', {
+            artist_id: artistId, platform: 'youtube_analytics', status: 'connected',
+            encrypted_secret: encryptSecret({refreshToken: json.refresh_token}),
+            connected_at: new Date().toISOString()
+          }, (err2)=> redirectToConnect(res, err2 ? 'error' : 'connected'));
+        }
+        // No valid per-artist state — today's single-tenant fallback, unchanged.
         ST.youtubeAnalytics = { refreshToken: json.refresh_token, connectedAt: Date.now() };
         saveST(ST);
         redirectToConnect(res,'connected');
       });
   }
 
-  if(req.method==='GET' && url==='/api/youtube-analytics/status')
+  if(req.method==='GET' && url==='/api/youtube-analytics/status'){
+    const token = bearerToken(req);
+    if(token && supabaseConfigured()){
+      return verifyArtistToken(token, (err, artist)=>{
+        if(err) return sendJson(res,200,{connected:false});
+        supabaseSelect('platform_connections',
+          'artist_id=eq.'+encodeURIComponent(artist.id)+'&platform=eq.youtube_analytics&select=status',
+          (err2,st,json)=>{
+            const row = Array.isArray(json) && json[0];
+            sendJson(res,200,{connected: !!(row && row.status==='connected')});
+          });
+      });
+    }
     return sendJson(res,200,{connected: !!(ST.youtubeAnalytics && ST.youtubeAnalytics.refreshToken)});
+  }
 
   // ── Manual platforms (24Six, Zing, Naki) — no public API for any of the three, but
   // all three have real artist-portal dashboards. This captures real login credentials,
@@ -294,6 +415,7 @@ function route(req,res,url){
   // nothing reads these credentials back out today. Never echoed, logged, or cached
   // outside this one encrypted blob. ──────────────────────────────────────────────
   const MANUAL_CODES = ['24','ZG','NK'];
+  const MANUAL_PLATFORM_KEY = { '24':'24six', 'ZG':'zing', 'NK':'naki' };
   if(req.method==='POST' && url==='/api/manual-platform/credentials'){
     return readJsonBody(req,(err,body)=>{
       if(err) return sendJson(res,400,{error:'bad json'});
@@ -302,6 +424,21 @@ function route(req,res,url){
       const password = String(body.password||'');
       if(MANUAL_CODES.indexOf(code)===-1) return sendJson(res,400,{error:'unknown platform code'});
       if(!username || !password) return sendJson(res,400,{error:'username and password required'});
+      const token = bearerToken(req);
+      if(token && supabaseConfigured()){
+        return verifyArtistToken(token, (err2, artist)=>{
+          if(err2) return sendJson(res,401,{error:'unauthorized'});
+          supabaseUpsert('platform_connections', {
+            artist_id: artist.id, platform: MANUAL_PLATFORM_KEY[code], status: 'connected',
+            encrypted_secret: encryptSecret({username, password}),
+            connected_at: new Date().toISOString()
+          }, (err3)=>{
+            if(err3) return sendJson(res,502,{error:'save failed'});
+            sendJson(res,200,{ok:true});
+          });
+        });
+      }
+      // No artist session — today's single-tenant fallback, unchanged.
       ST.manualCreds = ST.manualCreds || {};
       ST.manualCreds[code] = { username, password, savedAt: Date.now() };
       saveST(ST);
@@ -310,6 +447,22 @@ function route(req,res,url){
   }
 
   if(req.method==='GET' && url==='/api/manual-platform/status'){
+    const token = bearerToken(req);
+    if(token && supabaseConfigured()){
+      return verifyArtistToken(token, (err, artist)=>{
+        if(err) return sendJson(res,200,{});
+        supabaseSelect('platform_connections',
+          'artist_id=eq.'+encodeURIComponent(artist.id)+'&platform=in.(24six,zing,naki)&select=platform,status',
+          (err2,st,json)=>{
+            const rev = {'24six':'24','zing':'ZG','naki':'NK'};
+            const out = {};
+            (Array.isArray(json)?json:[]).forEach(function(r){
+              if(rev[r.platform]) out[rev[r.platform]] = r.status==='connected';
+            });
+            sendJson(res,200,out);
+          });
+      });
+    }
     const mc = ST.manualCreds || {};
     const out = {};
     MANUAL_CODES.forEach(c=>{ out[c] = !!(mc[c] && mc[c].username); });
