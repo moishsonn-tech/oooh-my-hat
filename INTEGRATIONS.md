@@ -158,6 +158,51 @@ For portals with no API, scheduled scrapes, and anything a human would click thr
 - Google Sheets: read via export URLs or API; EDITING via browser automation is fragile
   (clipboard/formula gotchas) — prefer the Sheets API or Apps Script for writes.
 
+## 14. Music-platform artist connections (streams/analytics)
+Built for `frontend/connect.html` + `backend/proxy.js` on the AI-Artist Intelligence project.
+Two lessons worth keeping for the next platform integration like this one:
+
+- **A public API existing tells you nothing about whether it has the number you actually
+  want.** Spotify's Web API, Apple's MusicKit, and Amazon's Music Web API are all real,
+  documented APIs — none of them expose real stream counts or listener analytics. Spotify in
+  particular has *never* exposed real stream data via API, to anyone, not even the artist.
+  Always check "does this endpoint return the metric I need," not just "does an API exist."
+- **✓ proven — OAuth 2.0 authorization-code flow with an encrypted refresh token**, the
+  pattern behind YouTube Analytics (the one platform in this set with a genuine, self-serve,
+  real-analytics API): `/auth` route 302-redirects to the provider's consent screen →
+  provider redirects back to a `/callback` route with a `code` → proxy exchanges `code` for
+  tokens server-side → the refresh token is folded into the same encrypted state blob the PIN
+  hash already uses (`ST`/`STATE_FILE`/`STATE_KEY_FILE`, AES-256-GCM — see `backend/proxy.js`)
+  — never returned to the client, only a boolean `connected` status is. This is the first use
+  of this pattern in the kit; reuse it for the next OAuth-gated third-party API rather than
+  re-deriving it (§4 above only covers verifying a token the client already has, a different,
+  lighter-weight flow — don't confuse the two).
+- **✓ proven — leaving connection routes deliberately open, not gated,** when the app itself
+  has no access gate (an explicit product decision, not an oversight) — rate-limit by IP
+  instead of requiring a login, and keep the sensitive routes (anything writing a real
+  credential) on the tightest limit of the group.
+- **✓ proven — capturing real third-party portal credentials as Phase 1 of a future §7/§8
+  scheduled Playwright scrape**, for platforms with a real artist dashboard but no API at all
+  (24Six, Zing, Naki in this project's case). Encrypt immediately on submit via the same state
+  primitive above; nothing reads the credentials back out until the actual scrape (Phase 2) is
+  built — don't let a credential-capture form imply live data is flowing before it is.
+- Capability reality, platform by platform (re-check before assuming this is still current —
+  these are all business decisions on the provider's side, not technical limits that can be
+  worked around):
+  - **Spotify**: Client Credentials (app-only) → public followers/popularity/genres. No stream
+    data via API, period.
+  - **YouTube**: Data API v3 (API key) → public subscriber/view/video counts. YouTube
+    Analytics API (OAuth, `yt-analytics.readonly` scope) → real per-video streams/watch-time/
+    demographics — the one genuinely self-serve real-analytics option in this set.
+  - **Apple Music**: MusicKit API → catalog metadata only. A real Music Analytics API exists
+    but is eligibility-gated by Apple (an application, not self-serve OAuth).
+  - **Amazon Music**: a real Web API exists but is closed-beta, gated behind an Amazon
+    Business Development contact — not self-serve today.
+  - **24Six / Zing / Naki**: no public API from any of the three, but all three have real
+    artist-facing analytics dashboards (24Six: analytics + royalty splitting; Naki: real-time
+    streams/listeners/daily earnings) — the data exists, it's a business ask (recurring
+    export, portal access, or an API partnership), not a technical one.
+
 ---
 
 ## The meta-rules (apply to every integration)
